@@ -302,17 +302,32 @@ def detection(patient_id):
                     predicted_class = classes[preds.item()]
                     return predicted_class
                 predicted_class = predict_image(slice_path)
-                print(f"Image: {slice_path}, Predicted Class: {predicted_class}")
 
             save_image_path = f"uploads/CT_Scans/CT{patient_id}/Results/Axial/{name}.png"
             save_results(image, pred, save_image_path)
-            if(predicted_class!=""):
-                image = cv2.imread(save_image_path, cv2.IMREAD_GRAYSCALE)
+            
+            # Assuming the `save_image_path` has been properly saved by `save_results` function
+            if predicted_class != "":
+                # Load the image in color (BGR format)
+                image = cv2.imread(save_image_path, cv2.IMREAD_COLOR)  # Load image in color (3 channels)
+
+                # Create a figure and axis using Matplotlib
                 fig, ax = plt.subplots()
+
+                # Display the image in Matplotlib
+                ax.imshow(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))  # Convert BGR to RGB for displaying in Matplotlib
+
+                # Add text at the top-left corner
                 ax.text(10, 20, predicted_class, color="white", fontsize=14, 
                         bbox=dict(facecolor="black", alpha=0.5, edgecolor="none"))
+
+                # Hide axes for clean look
                 ax.axis("off")
+
+                # Save the image with the overlayed text (with tight bounding box and no padding)
                 plt.savefig(save_image_path, bbox_inches="tight", pad_inches=0, dpi=300)
+
+                # Close the plot to avoid memory issues
                 plt.close(fig)
 
         for slice_path in coronal_slices:
