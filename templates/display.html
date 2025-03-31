@@ -49,8 +49,6 @@
         }
 
         img {
-            
-             /* Increase height */
             width: 40%;
             height: 60%;
             border: 2px solid black;
@@ -59,8 +57,29 @@
             background-color: #1e1e1e;
         }
 
+        /* Button Styles */
+        .button-container {
+            display: flex;
+            gap: 10px;
+            margin-top: 15px;
+        }
 
-        /* Back Button */
+        .axis-btn {
+            padding: 10px 15px;
+            background-color: #00d4ff;
+            border: none;
+            border-radius: 6px;
+            color: white;
+            font-size: 16px;
+            cursor: pointer;
+            transition: background-color 0.3s ease, transform 0.2s ease;
+        }
+
+        .axis-btn:hover {
+            background-color: #0097a7;
+            transform: scale(1.05);
+        }
+
         .back-btn-container {
             margin-top: 20px;
         }
@@ -80,6 +99,7 @@
             background-color: #0097a7;
             transform: scale(1.05);
         }
+
         .footer {
             width: 100%;
             background-color: #203a43;
@@ -89,21 +109,29 @@
             position: absolute;
             bottom: 0;
         }
-
     </style>
 </head>
 <body>
 
     <h2>CT Scan Slices Viewer</h2>
-    <div class="slider-container">
-        <input type="range" id="sliceSlider" min="0" max="340" value="0" step="1" oninput="updateImage()">
+
+    <!-- Buttons for Axis Selection -->
+    <div class="button-container">
+        <button class="axis-btn" onclick="switchAxis('axial')">Axial</button>
+        <button class="axis-btn" onclick="switchAxis('coronal')">Coronal</button>
+        <button class="axis-btn" onclick="switchAxis('sagittal')">Sagittal</button>
     </div>
+
+    <div class="slider-container">
+        <input type="range" id="sliceSlider" min="0" max="0" value="0" step="1" oninput="updateImage()">
+    </div>
+
     <span id="sliceInfo"></span>
     <img id="ctImage" src="" alt="CT Slice">
 
-    <script id="image-data" type="application/json">
-        {{ image_paths | tojson }}
-    </script>
+    <script id="axial-data" type="application/json">{{ axial_image_paths | tojson }}</script>
+    <script id="coronal-data" type="application/json">{{ coronal_image_paths | tojson }}</script>
+    <script id="sagittal-data" type="application/json">{{ sagittal_image_paths | tojson }}</script>
 
     <div class="back-btn-container">
         <form action="{{ url_for('view_patients') }}" method="get">
@@ -112,28 +140,48 @@
     </div>
 
     <script>
-        let image_paths = JSON.parse(document.getElementById("image-data").textContent);
+        let axial_images = JSON.parse(document.getElementById("axial-data").textContent);
+        let coronal_images = JSON.parse(document.getElementById("coronal-data").textContent);
+        let sagittal_images = JSON.parse(document.getElementById("sagittal-data").textContent);
+
+        let currentAxis = 'axial';  // Default axis
+        let image_paths = axial_images;  // Default images
 
         const imgElement = document.getElementById("ctImage");
         const sliceInfo = document.getElementById("sliceInfo");
         const sliceSlider = document.getElementById("sliceSlider");
 
-        // Update the slider max based on the number of images
-        sliceSlider.max = image_paths.length - 1;
+        function switchAxis(axis) {
+            if (axis === 'axial') {
+                image_paths = axial_images;
+            } else if (axis === 'coronal') {
+                image_paths = coronal_images;
+            } else if (axis === 'sagittal') {
+                image_paths = sagittal_images;
+            }
+
+            currentAxis = axis;
+            sliceSlider.max = image_paths.length - 1;
+            sliceSlider.value = 0;
+            updateImage();
+        }
 
         function updateImage() {
             let currentIndex = sliceSlider.value;
             imgElement.style.opacity = 0.6; // Smooth transition effect
             imgElement.src = image_paths[currentIndex];
             imgElement.onload = () => imgElement.style.opacity = 1;
-            sliceInfo.textContent = `Slice ${parseInt(currentIndex) + 1} of ${image_paths.length}`;
+            sliceInfo.textContent = `Slice ${parseInt(currentIndex) + 1} of ${image_paths.length} (${currentAxis})`;
         }
 
         // Initialize the first image
-        updateImage();
+        switchAxis('axial');
+
     </script>
-  <div class="footer">
+
+    <div class="footer">
         &copy; 2025 Fracture Vision
     </div>
+
 </body>
 </html>

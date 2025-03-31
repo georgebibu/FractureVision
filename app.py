@@ -16,6 +16,20 @@ import shutil
 import cv2
 import numpy as np
 import tensorflow as tf
+import torch
+import torch.nn as nn
+from torchvision import transforms, models
+from PIL import Image
+
+num_classes = 5  # Update based on your model
+axialresnet_path = "cnn axial 100 epoch 16 batch  tl 0 vl 58 ta 99 va 94.pth"  # Path to the saved model
+classes = ["buckle", "displaced", "no fracture" ,"non_displaced", "segmented"]
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+])
 
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///db.sqlite3'
@@ -143,6 +157,13 @@ def add_patient():
             patient_slices_folder = os.path.join(app.config['UPLOAD_FOLDER'], f"CT{patient.id}", "Slices")
             os.makedirs(patient_slices_folder, exist_ok=True)
             
+            axial_folder=os.path.join(patient_slices_folder,"Axial")
+            coronal_folder=os.path.join(patient_slices_folder,"Coronal")
+            sagittal_folder=os.path.join(patient_slices_folder,"Sagittal")
+            os.makedirs(axial_folder, exist_ok=True)
+            os.makedirs(coronal_folder, exist_ok=True)
+            os.makedirs(sagittal_folder, exist_ok=True)
+            
             file_path = os.path.join(patient_folder, filename)
             ct_scan.save(file_path)
 
@@ -151,12 +172,24 @@ def add_patient():
             ct_scan = sitk.ReadImage(file_path)
             ct_scan_array = sitk.GetArrayFromImage(ct_scan)
             for i in range(ct_scan_array.shape[0]):
-                ct_slice = ct_scan_array[i, :, :]
-                ct_output_filename = os.path.join(patient_slices_folder, f"ct_slice_{i}.png")
-                plt.imsave(ct_output_filename, ct_slice, cmap='gray')
-                slice=cv2.imread(ct_output_filename)
-                slice=cv2.resize(slice, (256,256))
-                plt.imsave(ct_output_filename,slice,cmap='gray')
+                axial_ct_slice = np.flipud(ct_scan_array[i, :, :])
+                coronal_ct_slice = np.flipud(ct_scan_array[:, i, :])
+                sagittal_ct_slice = np.flipud(ct_scan_array[:, :, i])
+                axial_output_filename = os.path.join(axial_folder, f"ct_slice_{i}.png")
+                coronal_output_filename = os.path.join(coronal_folder, f"ct_slice_{i}.png")
+                sagittal_output_filename = os.path.join(sagittal_folder, f"ct_slice_{i}.png")
+                plt.imsave(axial_output_filename, axial_ct_slice, cmap='gray')
+                plt.imsave(coronal_output_filename, coronal_ct_slice, cmap='gray')
+                plt.imsave(sagittal_output_filename, sagittal_ct_slice, cmap='gray')
+                a_slice=cv2.imread(axial_output_filename)
+                c_slice=cv2.imread(coronal_output_filename)
+                s_slice=cv2.imread(sagittal_output_filename)
+                a_slice=cv2.resize(a_slice, (256,256))
+                c_slice=cv2.resize(c_slice, (256,256))
+                s_slice=cv2.resize(s_slice, (256,256))
+                plt.imsave(axial_output_filename,a_slice,cmap='gray')
+                plt.imsave(coronal_output_filename,c_slice,cmap='gray')
+                plt.imsave(sagittal_output_filename,s_slice,cmap='gray')
 
             return redirect(url_for('home'))
     return render_template('add_patient.html')
@@ -174,13 +207,25 @@ def display(patient_id, folder_type):
     if not os.path.exists(patient_folder) or not os.path.isdir(patient_folder):
         flash("No CT scan images found.")
         return redirect(url_for('view_patients'))
-
-    image_paths = natsorted(
-        [f"/display/uploads/CT_Scans/CT{patient_id}/{folder_type}/{file}"  
-         for file in os.listdir(patient_folder) if file.lower().endswith(('.png', '.jpg', '.jpeg'))]
+    axial_folder=os.path.join(patient_folder,"Axial")
+    coronal_folder=os.path.join(patient_folder,"Coronal")
+    sagittal_folder=os.path.join(patient_folder,"Sagittal")
+    axial_image_paths = natsorted(
+        [f"/display/uploads/CT_Scans/CT{patient_id}/{folder_type}/Axial/{file}"  
+         for file in os.listdir(axial_folder) if file.lower().endswith(('.png', '.jpg', '.jpeg'))]
+    )
+    coronal_image_paths = natsorted(
+        [f"/display/uploads/CT_Scans/CT{patient_id}/{folder_type}/Coronal/{file}"  
+         for file in os.listdir(coronal_folder) if file.lower().endswith(('.png', '.jpg', '.jpeg'))]
+    )
+    sagittal_image_paths = natsorted(
+        [f"/display/uploads/CT_Scans/CT{patient_id}/{folder_type}/Sagittal/{file}"  
+         for file in os.listdir(sagittal_folder) if file.lower().endswith(('.png', '.jpg', '.jpeg'))]
     )
 
-    return render_template('display.html', image_paths=image_paths)
+    return render_template('display.html', axial_image_paths=axial_image_paths,
+                           coronal_image_paths=coronal_image_paths,
+                           sagittal_image_paths=sagittal_image_paths)
 
 @app.route('/detection/<int:patient_id>')
 def detection(patient_id):
@@ -212,25 +257,90 @@ def detection(patient_id):
     if os.path.exists(patient_slices_folder) and os.path.isdir(patient_slices_folder):
         patient_results_folder = os.path.join(app.config['UPLOAD_FOLDER'], f"CT{patient_id}", "Results")
         os.makedirs(patient_results_folder, exist_ok=True)
+        axial_results_folder=os.path.join(patient_results_folder,"Axial")
+        coronal_results_folder=os.path.join(patient_results_folder,"Coronal")
+        sagittal_results_folder=os.path.join(patient_results_folder,"Sagittal")
+        os.makedirs(axial_results_folder, exist_ok=True)
+        os.makedirs(coronal_results_folder, exist_ok=True)
+        os.makedirs(sagittal_results_folder, exist_ok=True)
         print(os.getcwd())
         
         with CustomObjectScope({'iou': iou, 'dice_coef': dice_coef, 'dice_loss': dice_loss}):
-            model = tf.keras.models.load_model("model(43).keras")
+            axial_model = tf.keras.models.load_model("axial.keras")
+            coronal_model = tf.keras.models.load_model("coronal.keras")
+            sagittal_model = tf.keras.models.load_model("sagittal.keras")
         
-        slices = sorted(glob(os.path.join("uploads", "CT_Scans", f"CT{patient_id}", "Slices", "*")))
+        axial_slices = sorted(glob(os.path.join("uploads", "CT_Scans", f"CT{patient_id}", "Slices", "Axial", "*")))
+        coronal_slices = sorted(glob(os.path.join("uploads", "CT_Scans", f"CT{patient_id}", "Slices", "Coronal", "*")))
+        sagittal_slices = sorted(glob(os.path.join("uploads", "CT_Scans", f"CT{patient_id}", "Slices", "Sagittal", "*")))
         
-        for slice in slices:
-            name = os.path.basename(slice).split(".")[0]
-            image = cv2.imread(slice, cv2.IMREAD_COLOR)
+        for slice_path in axial_slices:
+            name = os.path.basename(slice_path).split(".")[0]
+            image = cv2.imread(slice_path, cv2.IMREAD_COLOR)
             slice = image / 255.0
             slice = np.expand_dims(slice, axis=0)
 
-            pred = model.predict(slice)[0]
+            pred = axial_model.predict(slice)[0]
+            pred = np.squeeze(pred, axis=-1)
+            pred = pred > 0.5
+            pred = pred.astype(np.int32)
+            predicted_class=""
+            if(np.sum(pred) != 0):
+                axialresnetmodel = models.resnet18()
+                axialresnetmodel.fc = nn.Linear(axialresnetmodel.fc.in_features, num_classes)
+                axialresnetmodel.load_state_dict(torch.load(axialresnet_path, map_location=device))
+                axialresnetmodel = axialresnetmodel.to(device)
+                axialresnetmodel.eval()
+                def predict_image(image_path):
+                    image = Image.open(image_path).convert("RGB")
+                    image = transform(image).unsqueeze(0).to(device)  # Add batch dimension
+
+                    with torch.no_grad():
+                        outputs = axialresnetmodel(image)
+                        _, preds = torch.max(outputs, 1)
+
+                    predicted_class = classes[preds.item()]
+                    return predicted_class
+                predicted_class = predict_image(slice_path)
+                print(f"Image: {slice_path}, Predicted Class: {predicted_class}")
+
+            save_image_path = f"uploads/CT_Scans/CT{patient_id}/Results/Axial/{name}.png"
+            save_results(image, pred, save_image_path)
+            if(predicted_class!=""):
+                image = cv2.imread(save_image_path, cv2.IMREAD_GRAYSCALE)
+                fig, ax = plt.subplots()
+                ax.text(10, 20, predicted_class, color="white", fontsize=14, 
+                        bbox=dict(facecolor="black", alpha=0.5, edgecolor="none"))
+                ax.axis("off")
+                plt.savefig(save_image_path, bbox_inches="tight", pad_inches=0, dpi=300)
+                plt.close(fig)
+
+        for slice_path in coronal_slices:
+            name = os.path.basename(slice_path).split(".")[0]
+            image = cv2.imread(slice_path, cv2.IMREAD_COLOR)
+            slice = image / 255.0
+            slice = np.expand_dims(slice, axis=0)
+
+            pred = coronal_model.predict(slice)[0]
             pred = np.squeeze(pred, axis=-1)
             pred = pred > 0.5
             pred = pred.astype(np.int32)
 
-            save_image_path = f"uploads/CT_Scans/CT{patient_id}/Results/{name}.png"
+            save_image_path = f"uploads/CT_Scans/CT{patient_id}/Results/Coronal/{name}.png"
+            save_results(image, pred, save_image_path)
+
+        for slice_path in sagittal_slices:
+            name = os.path.basename(slice_path).split(".")[0]
+            image = cv2.imread(slice_path, cv2.IMREAD_COLOR)
+            slice = image / 255.0
+            slice = np.expand_dims(slice, axis=0)
+
+            pred = sagittal_model.predict(slice)[0]
+            pred = np.squeeze(pred, axis=-1)
+            pred = pred > 0.5
+            pred = pred.astype(np.int32)
+
+            save_image_path = f"uploads/CT_Scans/CT{patient_id}/Results/Sagittal/{name}.png"
             save_results(image, pred, save_image_path)
 
     return redirect(url_for('display', patient_id=patient_id, folder_type="Results"))
