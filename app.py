@@ -22,8 +22,8 @@ from torchvision import transforms, models
 from PIL import Image
 
 num_classes = 5  # Update based on your model
-axialresnet_path = "cnn axial 100 epoch 16 batch  tl 0 vl 58 ta 99 va 94.pth"
-coronalresnet_path="coronal(last)_18_checkpoint.pth"
+axialresnet_path = "resnet_axial.pth"
+coronalresnet_path="resnet_coronal.pth"
 classes = ["buckle", "displaced", "no fracture" ,"non_displaced", "segmented"]
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 transform = transforms.Compose([
