@@ -7,8 +7,11 @@ from glob import glob
 
 def generate_report(patient_folder, heatmap_image_path, output_path, patient, doctor):
     patient_folder = os.path.abspath(patient_folder)  # Convert to absolute path
-    results_folder = os.path.join(patient_folder, "Results")  # Look inside 'Results/' subfolder
-    print(f"🔍 Searching Images Inside: {results_folder}")
+    results_folder1 = os.path.join(patient_folder, "Results/Axial")  # Look inside 'Results/' subfolder
+    print(f"🔍 Searching Images Inside: {results_folder1}")
+    results_folder2 = os.path.join(patient_folder, "Results/Coronal")  # Look inside 'Results/' subfolder
+    print(f"🔍 Searching Images Inside: {results_folder2}")
+    
 
     c = canvas.Canvas(output_path)
 
@@ -134,19 +137,26 @@ def generate_report(patient_folder, heatmap_image_path, output_path, patient, do
     create_first_page()
 
     # Fetch images inside the 'Results/' subfolder
-    image_files = sorted(glob(os.path.join(results_folder, "*.jpg")) + 
-                         glob(os.path.join(results_folder, "*.jpeg")) + 
-                         glob(os.path.join(results_folder, "*.png")))
+    image_files1 = sorted(glob(os.path.join(results_folder1, "*.jpg")) + 
+                         glob(os.path.join(results_folder1, "*.jpeg")) + 
+                         glob(os.path.join(results_folder1, "*.png")))
+
+    image_files2 = sorted(glob(os.path.join(results_folder2, "*.jpg")) + 
+                         glob(os.path.join(results_folder2, "*.jpeg")) + 
+                         glob(os.path.join(results_folder2, "*.png")))
+    
 
     # Debugging: Print all images found
-    print(f"Images found in 'Results': {image_files}")
+    print(f"Images found in 'Results': {image_files1}")
 
     # Ensure file paths are valid
-    image_files = [img.replace("\\", "/") for img in image_files if os.path.exists(img)]
+    image_files1 = [img.replace("\\", "/") for img in image_files1 if os.path.exists(img)]
+    image_files2 = [img.replace("\\", "/") for img in image_files2 if os.path.exists(img)]
 
     # Add images to the report
-    if image_files:
-        add_images(image_files)
+    if image_files1 or image_files2:
+        add_images(image_files1)
+        add_images(image_files2)
     else:
         c.setFont("Helvetica-Bold", 18)
         c.setFillColor(colors.red)

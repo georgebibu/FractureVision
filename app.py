@@ -22,7 +22,8 @@ from torchvision import transforms, models
 from PIL import Image
 
 num_classes = 5  # Update based on your model
-axialresnet_path = "cnn axial 100 epoch 16 batch  tl 0 vl 58 ta 99 va 94.pth"  # Path to the saved model
+axialresnet_path = "cnn axial 100 epoch 16 batch  tl 0 vl 58 ta 99 va 94.pth"
+coronalresnet_path="coronal(last)_18_checkpoint.pth"
 classes = ["buckle", "displaced", "no fracture" ,"non_displaced", "segmented"]
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 transform = transforms.Compose([
@@ -173,22 +174,24 @@ def add_patient():
             ct_scan_array = sitk.GetArrayFromImage(ct_scan)
             for i in range(ct_scan_array.shape[0]):
                 axial_ct_slice = np.flipud(ct_scan_array[i, :, :])
-                coronal_ct_slice = np.flipud(ct_scan_array[:, i, :])
-                sagittal_ct_slice = np.flipud(ct_scan_array[:, :, i])
                 axial_output_filename = os.path.join(axial_folder, f"ct_slice_{i}.png")
-                coronal_output_filename = os.path.join(coronal_folder, f"ct_slice_{i}.png")
-                sagittal_output_filename = os.path.join(sagittal_folder, f"ct_slice_{i}.png")
                 plt.imsave(axial_output_filename, axial_ct_slice, cmap='gray')
-                plt.imsave(coronal_output_filename, coronal_ct_slice, cmap='gray')
-                plt.imsave(sagittal_output_filename, sagittal_ct_slice, cmap='gray')
                 a_slice=cv2.imread(axial_output_filename)
-                c_slice=cv2.imread(coronal_output_filename)
-                s_slice=cv2.imread(sagittal_output_filename)
                 a_slice=cv2.resize(a_slice, (256,256))
-                c_slice=cv2.resize(c_slice, (256,256))
-                s_slice=cv2.resize(s_slice, (256,256))
                 plt.imsave(axial_output_filename,a_slice,cmap='gray')
+            for i in range(ct_scan_array.shape[1]):
+                coronal_ct_slice = np.flipud(ct_scan_array[:, i, :])
+                coronal_output_filename = os.path.join(coronal_folder, f"ct_slice_{i}.png")
+                plt.imsave(coronal_output_filename, coronal_ct_slice, cmap='gray')
+                c_slice=cv2.imread(coronal_output_filename)
+                c_slice=cv2.resize(c_slice, (256,256))
                 plt.imsave(coronal_output_filename,c_slice,cmap='gray')
+            for i in range(ct_scan_array.shape[2]):
+                sagittal_ct_slice = np.flipud(ct_scan_array[:, :, i])
+                sagittal_output_filename = os.path.join(sagittal_folder, f"ct_slice_{i}.png")
+                plt.imsave(sagittal_output_filename, sagittal_ct_slice, cmap='gray')
+                s_slice=cv2.imread(sagittal_output_filename)
+                s_slice=cv2.resize(s_slice, (256,256))
                 plt.imsave(sagittal_output_filename,s_slice,cmap='gray')
 
             return redirect(url_for('home'))
@@ -340,9 +343,51 @@ def detection(patient_id):
             pred = np.squeeze(pred, axis=-1)
             pred = pred > 0.5
             pred = pred.astype(np.int32)
+            predicted_class=""
+            if(np.sum(pred) != 0):
+                coronalresnetmodel = models.resnet18()
+                coronalresnetmodel.fc = nn.Linear(coronalresnetmodel.fc.in_features, num_classes)
+                checkpoint = torch.load(coronalresnet_path, map_location=device)
+                coronalresnetmodel.load_state_dict(checkpoint["model_state_dict"])
+                coronalresnetmodel = coronalresnetmodel.to(device)
+                coronalresnetmodel.eval()
+                def predict_image(image_path):
+                    image = Image.open(image_path).convert("RGB")
+                    image = transform(image).unsqueeze(0).to(device)  # Add batch dimension
+
+                    with torch.no_grad():
+                        outputs = coronalresnetmodel(image)
+                        _, preds = torch.max(outputs, 1)
+
+                    predicted_class = classes[preds.item()]
+                    return predicted_class
+                predicted_class = predict_image(slice_path)
 
             save_image_path = f"uploads/CT_Scans/CT{patient_id}/Results/Coronal/{name}.png"
             save_results(image, pred, save_image_path)
+            if predicted_class!="":
+                # Load the image in color (BGR format)
+                image = cv2.imread(save_image_path, cv2.IMREAD_COLOR)  # Load image in color (3 channels)
+
+                # Create a figure and axis using Matplotlib
+                fig, ax = plt.subplots()
+
+                # Display the image in Matplotlib
+                ax.imshow(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))  # Convert BGR to RGB for displaying in Matplotlib
+
+                # Add text at the top-left corner
+                ax.text(10, 20, predicted_class, color="white", fontsize=14, 
+                        bbox=dict(facecolor="black", alpha=0.5, edgecolor="none"))
+
+                # Hide axes for clean look
+                ax.axis("off")
+
+                # Save the image with the overlayed text (with tight bounding box and no padding)
+                plt.savefig(save_image_path, bbox_inches="tight", pad_inches=0, dpi=300)
+
+                # Close the plot to avoid memory issues
+                plt.close(fig)
+
 
         for slice_path in sagittal_slices:
             name = os.path.basename(slice_path).split(".")[0]
