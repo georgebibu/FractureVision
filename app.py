@@ -20,6 +20,9 @@ import torch
 import torch.nn as nn
 from torchvision import transforms, models
 from PIL import Image
+import nibabel as nib
+from skimage.transform import resize
+from cfgan2 import Generator
 
 num_classes = 5  # Update based on your model
 axialresnet_path = "resnet_axial.pth"
@@ -81,6 +84,148 @@ def login():
             return redirect(url_for('login'))
     else:
         return render_template('login.html')
+    
+@app.route('/fused_detection/<int:patient_id>')
+def fused_detection(patient_id):
+    patient_folder = os.path.join("uploads", "CT_Scans", f"CT{patient_id}")
+    xray_ct_folder=os.path.join(patient_folder,"X-Ray_CT")
+    os.makedirs(xray_ct_folder, exist_ok=True)
+    for file in os.listdir(patient_folder):
+        if file.endswith(".nii"):
+            nii_file = os.path.join(patient_folder, file)
+    ct_scan = nib.load(nii_file)
+    ct_data = ct_scan.get_fdata()
+    original_shape = ct_data.shape
+    target_size = (256, 256)
+    def normalize_image(img):
+        """Normalize intensity to 0-255"""
+        img = (img - np.min(img)) / (np.max(img) - np.min(img)) * 255
+        return img.astype(np.uint8)
+
+    def preprocess_and_resize(slice_data):
+        """Resize & normalize a CT slice"""
+        slice_data = np.nan_to_num(slice_data)  # Replace NaNs with 0
+        slice_resized = resize(slice_data, target_size, anti_aliasing=True)
+        return normalize_image(slice_resized)
+
+    # ===== Generate Synthetic X-rays (MIP) =====
+    mip_frontal = np.max(ct_data, axis=0)  # Axial Projection
+    mip_side = np.max(ct_data, axis=1)  # Coronal Projection
+    mip_alt_side = np.max(ct_data, axis=2)  # Sagittal Projection
+
+    # Resize MIP images to match CT slices
+    xray_frontal = preprocess_and_resize(mip_frontal)
+    xray_side = preprocess_and_resize(mip_side)
+    xray_alt_side = preprocess_and_resize(mip_alt_side)
+
+    middle_x = ct_data.shape[0] // 2  # Axial (Top-down)
+    middle_y = ct_data.shape[1] // 2  # Coronal (Front)
+    middle_z = ct_data.shape[2] // 2  # Sagittal (Side)
+
+    axial_slice = preprocess_and_resize(ct_data[middle_x, :, :])  # Axial slice
+    coronal_slice = preprocess_and_resize(ct_data[:, middle_y, :])  # Coronal slice
+    sagittal_slice = preprocess_and_resize(ct_data[:, :, middle_z])  # Sagittal slice
+
+    cv2.imwrite(os.path.join(xray_ct_folder, "synthetic_xray_frontal.png"), xray_side)
+    cv2.imwrite(os.path.join(xray_ct_folder, "synthetic_xray_side.png"), xray_frontal)
+    cv2.imwrite(os.path.join(xray_ct_folder, "synthetic_xray_alt_side.png"), xray_alt_side)
+
+    cv2.imwrite(os.path.join(xray_ct_folder, "axial_slice.png"), sagittal_slice)
+    cv2.imwrite(os.path.join(xray_ct_folder, "coronal_slice.png"), coronal_slice)
+    cv2.imwrite(os.path.join(xray_ct_folder, "sagittal_slice.png"), axial_slice)
+
+    def load_generator(checkpoint_path, device):
+        gen = Generator().to(device)
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        gen.load_state_dict(checkpoint['gen_state_dict'])
+        gen.eval()  # Set to evaluation mode
+        print(f"✅ Loaded model from {checkpoint_path}")
+        return gen
+    
+    def preprocess_image(image_path):
+        transform = transforms.Compose([
+            transforms.Resize((256, 256)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.5], std=[0.5])
+        ])
+        img = Image.open(image_path).convert('L')  # Convert to grayscale
+        return transform(img).unsqueeze(0)
+    def enhance_image(image):
+        # Convert to OpenCV format
+        img_cv = np.array(image, dtype=np.uint8)
+        
+        # Apply Contrast Limited Adaptive Histogram Equalization (CLAHE)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        img_clahe = clahe.apply(img_cv)
+        
+        # Apply Laplacian sharpening
+        laplacian = cv2.Laplacian(img_clahe, cv2.CV_64F)
+        img_sharp = cv2.convertScaleAbs(img_clahe - 0.5 * laplacian)
+        
+        # Apply Unsharp Masking
+        blurred = cv2.GaussianBlur(img_sharp, (3, 3), 0)
+        img_unsharp = cv2.addWeighted(img_sharp, 1.5, blurred, -0.5, 0)
+        
+        return Image.fromarray(img_unsharp)
+    
+    def fuse_images(xray_path, ct_path, gen, device, save_dir, name):
+        os.makedirs(save_dir, exist_ok=True)  # Ensure save directory exists
+
+        # Load images
+        xray = preprocess_image(xray_path).to(device)
+        ct = preprocess_image(ct_path).to(device)
+
+        # Save X-ray & CT images as reference
+        xray_img = Image.open(xray_path).convert("L").resize((256, 256))
+        ct_img = Image.open(ct_path).convert("L").resize((256, 256))
+        
+        # Generate fused image
+        with torch.no_grad():
+            fused = gen(xray, ct)
+        
+        assert isinstance(fused, torch.Tensor), "Generator output is not a tensor!"
+        fused_img = fused.squeeze(0).cpu().numpy()
+
+        # Normalize to [0,255] and convert to uint8
+        fused_img = ((fused_img + 1) / 2 * 255).clip(0, 255).astype(np.uint8)
+        
+        # Apply blending to balance X-ray & CT
+        alpha = 0.6  # Higher alpha gives more weight to the fused image
+        fused_img = alpha * fused_img + (1 - alpha) * np.array(ct_img)
+        fused_img = fused_img.clip(0, 255).astype(np.uint8)  # Ensure valid range
+        if fused_img.ndim == 3:
+            fused_img = fused_img.squeeze(0)
+        # Apply enhancement filters
+        fused_pil = Image.fromarray(fused_img, mode='L')
+        fused_pil = enhance_image(fused_pil)
+        
+        # Save fused image
+        fused_save_path = os.path.join(save_dir, name)
+        fused_pil.save(fused_save_path)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    axial_checkpoint_path = "C:/Users/georg/FractureVision/cfgan_axial.pth"
+    coronal_checkpoint_path = "C:/Users/georg/FractureVision/cfgan_coronal.pth"
+    sagittal_checkpoint_path = "C:/Users/georg/FractureVision/cfgan_sagittal.pth"
+
+    axial_gen = load_generator(axial_checkpoint_path, device)
+    coronal_gen = load_generator(coronal_checkpoint_path, device)
+    sagittal_gen = load_generator(sagittal_checkpoint_path, device)
+
+    axial_xray_test = os.path.join(patient_folder,"X-ray_CT","synthetic_xray_alt_side.png")
+    axial_ct_test = os.path.join(patient_folder,"X-ray_CT","axial_slice.png")
+    coronal_xray_test = os.path.join(patient_folder,"X-ray_CT","synthetic_xray_frontal.png")
+    coronal_ct_test = os.path.join(patient_folder,"X-ray_CT","coronal_slice.png")
+    sagittal_xray_test = os.path.join(patient_folder,"X-ray_CT","synthetic_xray_side.png")
+    sagittal_ct_test = os.path.join(patient_folder,"X-ray_CT","sagittal_slice.png")
+    fused_results_folder = os.path.join(patient_folder,"fused_results")
+    os.makedirs(fused_results_folder, exist_ok=True)
+
+    fuse_images(axial_xray_test, axial_ct_test, axial_gen, device, fused_results_folder,"fused_axial.png")
+    fuse_images(coronal_xray_test, coronal_ct_test, coronal_gen, device, fused_results_folder,"fused_coronal.png")
+    fuse_images(sagittal_xray_test, sagittal_ct_test, sagittal_gen, device, fused_results_folder,"fused_sagittal.png")
+
+    return redirect(url_for('view_patients'))
 
 @app.route('/register', methods=['GET', 'POST'])
 def register():

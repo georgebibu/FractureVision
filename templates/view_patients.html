@@ -184,6 +184,9 @@
                         <form action="{{ url_for('detection', patient_id=patient.id) }}" method="get">
                             <button type="submit">Detection</button>
                         </form>
+                        <form action="{{ url_for('fused_detection', patient_id=patient.id) }}" method="get">
+                            <button type="submit">Fused Detection</button>
+                        </form>
                     </td>
                 </tr>
                 {% endfor %}
