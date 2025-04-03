@@ -24,15 +24,16 @@ import nibabel as nib
 from skimage.transform import resize
 from cfgan2 import Generator
 
-def save_results(image, y_pred, save_image_path):
-        y_pred = np.expand_dims(y_pred, axis=-1)
-        y_pred = np.concatenate([y_pred, y_pred, y_pred], axis=-1)
-        red_mask = np.zeros_like(y_pred)
-        red_mask[:, :, 0] = 255
-        image = np.clip(image, 0, 255).astype(np.uint8)
-        image_with_mask = np.where(y_pred > 0, red_mask, image)
-        cv2.imwrite(save_image_path, image_with_mask)
+from tensorflow.keras.models import Model
 
+def save_results(image, y_pred, save_image_path):
+    y_pred = np.expand_dims(y_pred, axis=-1)
+    y_pred = np.concatenate([y_pred, y_pred, y_pred], axis=-1)
+    red_mask = np.zeros_like(y_pred)
+    red_mask[:, :, 0] = 255
+    image = np.clip(image, 0, 255).astype(np.uint8)
+    image_with_mask = np.where(y_pred > 0, red_mask, image)
+    cv2.imwrite(save_image_path, image_with_mask)
 num_classes = 5  # Update based on your model
 axialresnet_path = "resnet_axial.pth"
 coronalresnet_path="resnet_coronal.pth"
