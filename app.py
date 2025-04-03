@@ -24,6 +24,29 @@ import nibabel as nib
 from skimage.transform import resize
 from cfgan2 import Generator
 
+def save_results(image, y_pred, save_image_path):
+    """ Overlay the predicted mask as bright red on the slice image. """
+    
+    # Ensure the predicted mask has the correct shape (H, W, 1)
+    y_pred = np.expand_dims(y_pred, axis=-1)  # (H, W, 1)
+    
+    # Convert the prediction to RGB format (H, W, 3)
+    y_pred = np.concatenate([y_pred, y_pred, y_pred], axis=-1)  # (H, W, 3)
+    
+    # Create a bright red mask (red = [255, 0, 0], green and blue = 0)
+    red_mask = np.zeros_like(y_pred)
+    red_mask[:, :, 0] = 255  # Set the red channel to 255 (bright red)
+    
+    # Ensure the original slice is in uint8 format (0-255)
+    image = np.clip(image, 0, 255).astype(np.uint8)
+    
+    # Overlap the red predicted mask on the original image
+    # If the prediction is >0, place the red mask; otherwise, use the original image
+    image_with_mask = np.where(y_pred > 0, red_mask, image)  # Replace with red mask where prediction > 0
+    
+    # Save the resulting image
+    cv2.imwrite(save_image_path, image_with_mask)
+
 num_classes = 5  # Update based on your model
 axialresnet_path = "resnet_axial.pth"
 coronalresnet_path="resnet_coronal.pth"
@@ -218,14 +241,84 @@ def fused_detection(patient_id):
     coronal_ct_test = os.path.join(patient_folder,"X-ray_CT","coronal_slice.png")
     sagittal_xray_test = os.path.join(patient_folder,"X-ray_CT","synthetic_xray_side.png")
     sagittal_ct_test = os.path.join(patient_folder,"X-ray_CT","sagittal_slice.png")
-    fused_results_folder = os.path.join(patient_folder,"fused_results")
+    fused_images_folder = os.path.join(patient_folder,"fused_images")
+    os.makedirs(fused_images_folder, exist_ok=True)
+
+    fuse_images(axial_xray_test, axial_ct_test, axial_gen, device, fused_images_folder,"fused_axial.png")
+    fuse_images(coronal_xray_test, coronal_ct_test, coronal_gen, device, fused_images_folder,"fused_coronal.png")
+    fuse_images(sagittal_xray_test, sagittal_ct_test, sagittal_gen, device, fused_images_folder,"fused_sagittal.png")
+    
+    fused_results_folder=os.path.join(patient_folder,"fused_results")
     os.makedirs(fused_results_folder, exist_ok=True)
+    with CustomObjectScope({'iou': iou, 'dice_coef': dice_coef, 'dice_loss': dice_loss}):
+        axial_model = tf.keras.models.load_model("axial.keras")
+        coronal_model = tf.keras.models.load_model("coronal.keras")
+        sagittal_model = tf.keras.models.load_model("sagittal.keras")
 
-    fuse_images(axial_xray_test, axial_ct_test, axial_gen, device, fused_results_folder,"fused_axial.png")
-    fuse_images(coronal_xray_test, coronal_ct_test, coronal_gen, device, fused_results_folder,"fused_coronal.png")
-    fuse_images(sagittal_xray_test, sagittal_ct_test, sagittal_gen, device, fused_results_folder,"fused_sagittal.png")
+    axial_slice = os.path.join(fused_images_folder,"fused_axial.png")
+    coronal_slice = os.path.join(fused_images_folder,"fused_coronal.png")
+    sagittal_slice = os.path.join(fused_images_folder,"fused_sagittal.png")
+    fused_slices=[axial_slice, coronal_slice, sagittal_slice]
+    for path in fused_slices:
+        name = os.path.basename(path).split(".")[0]
+        image = cv2.imread(path, cv2.IMREAD_COLOR)
+        slice = image / 255.0
+        slice = np.expand_dims(slice, axis=0)
+        if path==axial_slice:
+            current_model = axial_model
+        elif path==coronal_slice:
+            current_model = coronal_model
+        else:
+            current_model = sagittal_model
+        pred = current_model.predict(slice)[0]
+        pred = np.squeeze(pred, axis=-1)
+        pred = pred > 0.5
+        pred = pred.astype(np.int32)
+        predicted_class=""
+        if(np.sum(pred) != 0):
+            axialresnetmodel = models.resnet18()
+            axialresnetmodel.fc = nn.Linear(axialresnetmodel.fc.in_features, num_classes)
+            axialresnetmodel.load_state_dict(torch.load(axialresnet_path, map_location=device))
+            axialresnetmodel = axialresnetmodel.to(device)
+            axialresnetmodel.eval()
+            def predict_image(image_path):
+                image = Image.open(image_path).convert("RGB")
+                image = transform(image).unsqueeze(0).to(device)  # Add batch dimension
 
-    return redirect(url_for('view_patients'))
+                with torch.no_grad():
+                    outputs = axialresnetmodel(image)
+                    _, preds = torch.max(outputs, 1)
+
+                predicted_class = classes[preds.item()]
+                return predicted_class
+            predicted_class = predict_image(path)
+
+        save_image_path = f"uploads/CT_Scans/CT{patient_id}/fused_results/{name}.png"
+        save_results(image, pred, save_image_path)
+        if predicted_class != "":
+            # Load the image in color (BGR format)
+            image = cv2.imread(save_image_path, cv2.IMREAD_COLOR)  # Load image in color (3 channels)
+
+            # Create a figure and axis using Matplotlib
+            fig, ax = plt.subplots()
+
+            # Display the image in Matplotlib
+            ax.imshow(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))  # Convert BGR to RGB for displaying in Matplotlib
+
+            # Add text at the top-left corner
+            ax.text(10, 20, predicted_class, color="white", fontsize=14, 
+                    bbox=dict(facecolor="black", alpha=0.5, edgecolor="none"))
+
+            # Hide axes for clean look
+            ax.axis("off")
+
+            # Save the image with the overlayed text (with tight bounding box and no padding)
+            plt.savefig(save_image_path, bbox_inches="tight", pad_inches=0, dpi=300)
+
+            # Close the plot to avoid memory issues
+            plt.close(fig)
+
+    return redirect(url_for('display', patient_id=patient_id, folder_type="fused_results"))
 
 @app.route('/register', methods=['GET', 'POST'])
 def register():
@@ -351,54 +444,39 @@ def view_patients():
 @app.route('/display/<int:patient_id>/<string:folder_type>/')
 def display(patient_id, folder_type):
     patient_folder = os.path.join("uploads", "CT_Scans", f"CT{patient_id}", folder_type)
-
-    if not os.path.exists(patient_folder) or not os.path.isdir(patient_folder):
-        flash("No CT scan images found.")
-        return redirect(url_for('view_patients'))
-    axial_folder=os.path.join(patient_folder,"Axial")
-    coronal_folder=os.path.join(patient_folder,"Coronal")
-    sagittal_folder=os.path.join(patient_folder,"Sagittal")
-    axial_image_paths = natsorted(
-        [f"/display/uploads/CT_Scans/CT{patient_id}/{folder_type}/Axial/{file}"  
-         for file in os.listdir(axial_folder) if file.lower().endswith(('.png', '.jpg', '.jpeg'))]
-    )
-    coronal_image_paths = natsorted(
-        [f"/display/uploads/CT_Scans/CT{patient_id}/{folder_type}/Coronal/{file}"  
-         for file in os.listdir(coronal_folder) if file.lower().endswith(('.png', '.jpg', '.jpeg'))]
-    )
-    sagittal_image_paths = natsorted(
-        [f"/display/uploads/CT_Scans/CT{patient_id}/{folder_type}/Sagittal/{file}"  
-         for file in os.listdir(sagittal_folder) if file.lower().endswith(('.png', '.jpg', '.jpeg'))]
-    )
-
-    return render_template('display.html', axial_image_paths=axial_image_paths,
+    if folder_type=="fused_results":
+        axial_image_paths=[f"/display/uploads/CT_Scans/CT{patient_id}/{folder_type}/fused_axial.png"]
+        coronal_image_paths=[f"/display/uploads/CT_Scans/CT{patient_id}/{folder_type}/fused_coronal.png"]
+        sagittal_image_paths=[f"/display/uploads/CT_Scans/CT{patient_id}/{folder_type}/fused_sagittal.png"]
+        return render_template('display.html', axial_image_paths=axial_image_paths,
                            coronal_image_paths=coronal_image_paths,
                            sagittal_image_paths=sagittal_image_paths)
+    else:
+        if not os.path.exists(patient_folder) or not os.path.isdir(patient_folder):
+            flash("No CT scan images found.")
+            return redirect(url_for('view_patients'))
+        axial_folder=os.path.join(patient_folder,"Axial")
+        coronal_folder=os.path.join(patient_folder,"Coronal")
+        sagittal_folder=os.path.join(patient_folder,"Sagittal")
+        axial_image_paths = natsorted(
+            [f"/display/uploads/CT_Scans/CT{patient_id}/{folder_type}/Axial/{file}"  
+            for file in os.listdir(axial_folder) if file.lower().endswith(('.png', '.jpg', '.jpeg'))]
+        )
+        coronal_image_paths = natsorted(
+            [f"/display/uploads/CT_Scans/CT{patient_id}/{folder_type}/Coronal/{file}"  
+            for file in os.listdir(coronal_folder) if file.lower().endswith(('.png', '.jpg', '.jpeg'))]
+        )
+        sagittal_image_paths = natsorted(
+            [f"/display/uploads/CT_Scans/CT{patient_id}/{folder_type}/Sagittal/{file}"  
+            for file in os.listdir(sagittal_folder) if file.lower().endswith(('.png', '.jpg', '.jpeg'))]
+        )
+
+        return render_template('display.html', axial_image_paths=axial_image_paths,
+                            coronal_image_paths=coronal_image_paths,
+                            sagittal_image_paths=sagittal_image_paths)
 
 @app.route('/detection/<int:patient_id>')
 def detection(patient_id):
-    def save_results(image, y_pred, save_image_path):
-        """ Overlay the predicted mask as bright red on the slice image. """
-        
-        # Ensure the predicted mask has the correct shape (H, W, 1)
-        y_pred = np.expand_dims(y_pred, axis=-1)  # (H, W, 1)
-        
-        # Convert the prediction to RGB format (H, W, 3)
-        y_pred = np.concatenate([y_pred, y_pred, y_pred], axis=-1)  # (H, W, 3)
-        
-        # Create a bright red mask (red = [255, 0, 0], green and blue = 0)
-        red_mask = np.zeros_like(y_pred)
-        red_mask[:, :, 0] = 255  # Set the red channel to 255 (bright red)
-        
-        # Ensure the original slice is in uint8 format (0-255)
-        image = np.clip(image, 0, 255).astype(np.uint8)
-        
-        # Overlap the red predicted mask on the original image
-        # If the prediction is >0, place the red mask; otherwise, use the original image
-        image_with_mask = np.where(y_pred > 0, red_mask, image)  # Replace with red mask where prediction > 0
-        
-        # Save the resulting image
-        cv2.imwrite(save_image_path, image_with_mask)
 
     patient_slices_folder = os.path.join("uploads", "CT_Scans", f"CT{patient_id}", "Slices")
     
@@ -411,7 +489,6 @@ def detection(patient_id):
         os.makedirs(axial_results_folder, exist_ok=True)
         os.makedirs(coronal_results_folder, exist_ok=True)
         os.makedirs(sagittal_results_folder, exist_ok=True)
-        print(os.getcwd())
         
         with CustomObjectScope({'iou': iou, 'dice_coef': dice_coef, 'dice_loss': dice_loss}):
             axial_model = tf.keras.models.load_model("axial.keras")
