@@ -5,7 +5,7 @@ from natsort import natsorted
 from flask_sqlalchemy import SQLAlchemy
 from glob import glob
 from metrics import dice_loss, dice_coef, iou
-from tensorflow.keras.utils import CustomObjectScope
+from tensorflow.keras.utils import CustomObjectScope, Model
 import logging
 import secrets
 import os
@@ -24,8 +24,14 @@ import nibabel as nib
 from skimage.transform import resize
 from cfgan2 import Generator
 
-from tensorflow.keras.models import Model
-
+def save_results(image, y_pred, save_image_path):
+        y_pred = np.expand_dims(y_pred, axis=-1)
+        y_pred = np.concatenate([y_pred, y_pred, y_pred], axis=-1)
+        red_mask = np.zeros_like(y_pred)
+        red_mask[:, :, 0] = 255
+        image = np.clip(image, 0, 255).astype(np.uint8)
+        image_with_mask = np.where(y_pred > 0, red_mask, image)
+        cv2.imwrite(save_image_path, image_with_mask)
 
 num_classes = 5  # Update based on your model
 axialresnet_path = "resnet_axial.pth"
@@ -500,14 +506,6 @@ def display(patient_id, folder_type):
 
 @app.route('/detection/<int:patient_id>')
 def detection(patient_id):
-    def save_results(image, y_pred, save_image_path):
-        y_pred = np.expand_dims(y_pred, axis=-1)
-        y_pred = np.concatenate([y_pred, y_pred, y_pred], axis=-1)
-        red_mask = np.zeros_like(y_pred)
-        red_mask[:, :, 0] = 255
-        image = np.clip(image, 0, 255).astype(np.uint8)
-        image_with_mask = np.where(y_pred > 0, red_mask, image)
-        cv2.imwrite(save_image_path, image_with_mask)
 
     patient_folder = os.path.join("uploads", "CT_Scans", f"CT{patient_id}")
     slices_folder = os.path.join(patient_folder, "Slices")
