@@ -7,8 +7,8 @@ from glob import glob
 
 def generate_report(patient_folder, output_path, patient, doctor):
     patient_folder = os.path.abspath(patient_folder)  # Convert to absolute path
-    images_folder = os.path.join(patient_folder, "reportimage")  
-    heatmaps_folder = os.path.join(patient_folder, "report heat")  
+    images_folder = os.path.join(patient_folder, "reportimages")  
+    heatmaps_folder = os.path.join(patient_folder, "reportheat")  
     
     print(f"🔍 Searching Images Inside: {images_folder}")
     print(f"🔍 Searching Heatmaps Inside: {heatmaps_folder}")

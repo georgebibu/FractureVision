@@ -5,7 +5,7 @@ from natsort import natsorted
 from flask_sqlalchemy import SQLAlchemy
 from glob import glob
 from metrics import dice_loss, dice_coef, iou
-from tensorflow.keras.utils import CustomObjectScope, Model
+from tensorflow.keras.utils import CustomObjectScope
 import logging
 import secrets
 import os
@@ -608,41 +608,25 @@ def generate_report_route(patient_id):
         flash('Doctor not found.')
         return redirect(url_for('view_patients'))
 
-    patient_folder = os.path.join(app.config['UPLOAD_FOLDER'], f"CT{patient_id}")  
-    heatmap_path = os.path.join(app.config['UPLOAD_FOLDER'], 'gradcam.jpg')  
+    patient_folder = f"C:/Users/georg/FractureVision/uploads/CT_Scans/CT{patient_id}"
+    output_path = os.path.join(patient_folder,f"report{patient_id}.pdf")  
 
-    # Get the user's Downloads folder
-    #downloads_folder = os.path.join(os.path.expanduser("~"), "Downloads")
-    output_path="C:/reports"
-    #output_path = os.path.join(os.path.expanduser("~"), "Documents")
-# Ensure the Downloads folder exists (should exist by default)
-    if not os.path.exists(output_path):
-        print("downloads not accessable")
-    # Set the output path to the user's download folder
-    #output_path = os.path.join("C:\\Users\\georg\\Documents", f"report_{patient_id}.pdf")
-
-    print(f"Output path: {output_path}")  # Debugging
+    if not os.path.exists(patient_folder):
+        print("Not accessable")
 
     # Ensure patient folder exists
-    print("11")
     if not os.path.exists(patient_folder):
         flash(f'Patient folder not found: {patient_folder}')
         
-    print("2")
-    # Generate the report
-    print("1")
     generate_report(patient_folder, output_path, patient, doctor)
-    print("2")
     # Debugging: Check if the file was created
     if os.path.exists(output_path):
         print("PDF file created successfully!")
     else:
         print("PDF file was NOT created!")
         flash('Error generating report.')
-        return redirect(url_for('view_patients'))
 
-    # Return the file to the user
-    return send_file(output_path, as_attachment=True)
+    return redirect(url_for('view_patients'))
 
 
 if __name__ == '__main__':
