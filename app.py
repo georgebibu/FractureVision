@@ -24,6 +24,9 @@ import nibabel as nib
 from skimage.transform import resize
 from cfgan2 import Generator
 
+from tensorflow.keras.models import Model
+
+
 num_classes = 5  # Update based on your model
 axialresnet_path = "resnet_axial.pth"
 coronalresnet_path="resnet_coronal.pth"
@@ -41,8 +44,51 @@ app.config['SECRET_KEY'] = secrets.token_hex(16)
 app.config['UPLOAD_FOLDER'] = 'uploads/CT_Scans'
 db = SQLAlchemy(app)
 
+
+
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
+
+def grad_cam(model, image, layer_name="conv2d_18"):
+    with tf.device('/GPU:0'):  # Use GPU if available
+        grad_model = Model(inputs=model.input, outputs=[model.get_layer(layer_name).output, model.output])
+        
+        with tf.GradientTape() as tape:
+            conv_outputs, predictions = grad_model(image)
+            class_idx = tf.argmax(predictions, axis=-1)  # Get predicted class
+            loss = tf.reduce_sum(predictions * tf.one_hot(class_idx, depth=predictions.shape[-1]))
+
+        grads = tape.gradient(loss, conv_outputs)  # Compute gradients
+        pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))  # Global Average Pooling
+        conv_outputs = conv_outputs.numpy()[0]
+        pooled_grads = pooled_grads.numpy()
+
+        # Multiply each feature map by its importance weight
+        for i in range(pooled_grads.shape[-1]):
+            conv_outputs[:, :, i] *= pooled_grads[i]
+
+        heatmap = np.mean(conv_outputs, axis=-1)  # Mean across feature maps
+        heatmap = np.maximum(heatmap, 0)  # ReLU: Only keep positive values
+        heatmap /= np.max(heatmap) if np.max(heatmap) != 0 else 1  # Normalize
+
+        return heatmap
+
+# Function to overlay heatmap on the original image
+def overlay_heatmap(image, heatmap, alpha=0.4):
+    """Overlay heatmap on the original image with adjustable transparency."""
+    heatmap = cv2.resize(heatmap, (image.shape[1], image.shape[0]))  # Resize to match image
+    heatmap = np.uint8(255 * heatmap)  # Convert to uint8
+    heatmap = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)  # Apply colormap
+
+    # Ensure original image is uint8
+    if image.dtype != np.uint8:
+        image = (image * 255).astype(np.uint8)
+
+    overlay = cv2.addWeighted(image, 1 - alpha, heatmap, alpha, 0)  # Blend images
+    return overlay
+
+
+
 
 class Doctor(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -378,177 +424,71 @@ def display(patient_id, folder_type):
 @app.route('/detection/<int:patient_id>')
 def detection(patient_id):
     def save_results(image, y_pred, save_image_path):
-        """ Overlay the predicted mask as bright red on the slice image. """
-        
-        # Ensure the predicted mask has the correct shape (H, W, 1)
-        y_pred = np.expand_dims(y_pred, axis=-1)  # (H, W, 1)
-        
-        # Convert the prediction to RGB format (H, W, 3)
-        y_pred = np.concatenate([y_pred, y_pred, y_pred], axis=-1)  # (H, W, 3)
-        
-        # Create a bright red mask (red = [255, 0, 0], green and blue = 0)
+        y_pred = np.expand_dims(y_pred, axis=-1)
+        y_pred = np.concatenate([y_pred, y_pred, y_pred], axis=-1)
         red_mask = np.zeros_like(y_pred)
-        red_mask[:, :, 0] = 255  # Set the red channel to 255 (bright red)
-        
-        # Ensure the original slice is in uint8 format (0-255)
+        red_mask[:, :, 0] = 255
         image = np.clip(image, 0, 255).astype(np.uint8)
-        
-        # Overlap the red predicted mask on the original image
-        # If the prediction is >0, place the red mask; otherwise, use the original image
-        image_with_mask = np.where(y_pred > 0, red_mask, image)  # Replace with red mask where prediction > 0
-        
-        # Save the resulting image
+        image_with_mask = np.where(y_pred > 0, red_mask, image)
         cv2.imwrite(save_image_path, image_with_mask)
 
-    patient_slices_folder = os.path.join("uploads", "CT_Scans", f"CT{patient_id}", "Slices")
-    
-    if os.path.exists(patient_slices_folder) and os.path.isdir(patient_slices_folder):
-        patient_results_folder = os.path.join(app.config['UPLOAD_FOLDER'], f"CT{patient_id}", "Results")
-        os.makedirs(patient_results_folder, exist_ok=True)
-        axial_results_folder=os.path.join(patient_results_folder,"Axial")
-        coronal_results_folder=os.path.join(patient_results_folder,"Coronal")
-        sagittal_results_folder=os.path.join(patient_results_folder,"Sagittal")
-        os.makedirs(axial_results_folder, exist_ok=True)
-        os.makedirs(coronal_results_folder, exist_ok=True)
-        os.makedirs(sagittal_results_folder, exist_ok=True)
-        print(os.getcwd())
-        
-        with CustomObjectScope({'iou': iou, 'dice_coef': dice_coef, 'dice_loss': dice_loss}):
-            axial_model = tf.keras.models.load_model("axial.keras")
-            coronal_model = tf.keras.models.load_model("coronal.keras")
-            sagittal_model = tf.keras.models.load_model("sagittal.keras")
-        
-        axial_slices = sorted(glob(os.path.join("uploads", "CT_Scans", f"CT{patient_id}", "Slices", "Axial", "*")))
-        coronal_slices = sorted(glob(os.path.join("uploads", "CT_Scans", f"CT{patient_id}", "Slices", "Coronal", "*")))
-        sagittal_slices = sorted(glob(os.path.join("uploads", "CT_Scans", f"CT{patient_id}", "Slices", "Sagittal", "*")))
-        
-        for slice_path in axial_slices:
+    patient_folder = os.path.join("uploads", "CT_Scans", f"CT{patient_id}")
+    slices_folder = os.path.join(patient_folder, "Slices")
+    results_folder = os.path.join(patient_folder, "Results")
+    report_images_folder = os.path.join(patient_folder, "reportimages")
+    report_heat_folder = os.path.join(patient_folder, "reportheat")
+
+    os.makedirs(results_folder, exist_ok=True)
+    os.makedirs(report_images_folder, exist_ok=True)
+    os.makedirs(report_heat_folder, exist_ok=True)
+
+    # Load U-Net models only (No Sagittal ResNet)
+    with CustomObjectScope({'iou': iou, 'dice_coef': dice_coef, 'dice_loss': dice_loss}):
+        axial_model = tf.keras.models.load_model("axial.keras")
+        coronal_model = tf.keras.models.load_model("coronal.keras")
+        sagittal_model = tf.keras.models.load_model("sagittal.keras")
+
+    for view in ["Axial","Coronal","Sagittal"]:
+        slices = sorted(glob(os.path.join(slices_folder, view, "*")))
+        for slice_path in slices:
             name = os.path.basename(slice_path).split(".")[0]
             image = cv2.imread(slice_path, cv2.IMREAD_COLOR)
             slice = image / 255.0
             slice = np.expand_dims(slice, axis=0)
 
-            pred = axial_model.predict(slice)[0]
-            pred = np.squeeze(pred, axis=-1)
-            pred = pred > 0.5
-            pred = pred.astype(np.int32)
-            predicted_class=""
-            if(np.sum(pred) != 0):
-                axialresnetmodel = models.resnet18()
-                axialresnetmodel.fc = nn.Linear(axialresnetmodel.fc.in_features, num_classes)
-                axialresnetmodel.load_state_dict(torch.load(axialresnet_path, map_location=device))
-                axialresnetmodel = axialresnetmodel.to(device)
-                axialresnetmodel.eval()
-                def predict_image(image_path):
-                    image = Image.open(image_path).convert("RGB")
-                    image = transform(image).unsqueeze(0).to(device)  # Add batch dimension
+            # Use U-Net for segmentation
+            if view == "Axial":
+                pred = axial_model.predict(slice)[0]
+                model = axial_model
+            elif view == "Coronal":
+                pred = coronal_model.predict(slice)[0]
+                model = coronal_model
+            elif view=="Sagittal":  # Sagittal
+                pred = sagittal_model.predict(slice)[0]
+                model = sagittal_model
 
-                    with torch.no_grad():
-                        outputs = axialresnetmodel(image)
-                        _, preds = torch.max(outputs, 1)
-
-                    predicted_class = classes[preds.item()]
-                    return predicted_class
-                predicted_class = predict_image(slice_path)
-
-            save_image_path = f"uploads/CT_Scans/CT{patient_id}/Results/Axial/{name}.png"
-            save_results(image, pred, save_image_path)
-            
-            # Assuming the `save_image_path` has been properly saved by `save_results` function
-            if predicted_class != "":
-                # Load the image in color (BGR format)
-                image = cv2.imread(save_image_path, cv2.IMREAD_COLOR)  # Load image in color (3 channels)
-
-                # Create a figure and axis using Matplotlib
-                fig, ax = plt.subplots()
-
-                # Display the image in Matplotlib
-                ax.imshow(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))  # Convert BGR to RGB for displaying in Matplotlib
-
-                # Add text at the top-left corner
-                ax.text(10, 20, predicted_class, color="white", fontsize=14, 
-                        bbox=dict(facecolor="black", alpha=0.5, edgecolor="none"))
-
-                # Hide axes for clean look
-                ax.axis("off")
-
-                # Save the image with the overlayed text (with tight bounding box and no padding)
-                plt.savefig(save_image_path, bbox_inches="tight", pad_inches=0, dpi=300)
-
-                # Close the plot to avoid memory issues
-                plt.close(fig)
-
-        for slice_path in coronal_slices:
-            name = os.path.basename(slice_path).split(".")[0]
-            image = cv2.imread(slice_path, cv2.IMREAD_COLOR)
-            slice = image / 255.0
-            slice = np.expand_dims(slice, axis=0)
-
-            pred = coronal_model.predict(slice)[0]
-            pred = np.squeeze(pred, axis=-1)
-            pred = pred > 0.5
-            pred = pred.astype(np.int32)
-            predicted_class=""
-            if(np.sum(pred) != 0):
-                coronalresnetmodel = models.resnet18()
-                coronalresnetmodel.fc = nn.Linear(coronalresnetmodel.fc.in_features, num_classes)
-                checkpoint = torch.load(coronalresnet_path, map_location=device)
-                coronalresnetmodel.load_state_dict(checkpoint["model_state_dict"])
-                coronalresnetmodel = coronalresnetmodel.to(device)
-                coronalresnetmodel.eval()
-                def predict_image(image_path):
-                    image = Image.open(image_path).convert("RGB")
-                    image = transform(image).unsqueeze(0).to(device)  # Add batch dimension
-
-                    with torch.no_grad():
-                        outputs = coronalresnetmodel(image)
-                        _, preds = torch.max(outputs, 1)
-
-                    predicted_class = classes[preds.item()]
-                    return predicted_class
-                predicted_class = predict_image(slice_path)
-
-            save_image_path = f"uploads/CT_Scans/CT{patient_id}/Results/Coronal/{name}.png"
-            save_results(image, pred, save_image_path)
-            if predicted_class!="":
-                # Load the image in color (BGR format)
-                image = cv2.imread(save_image_path, cv2.IMREAD_COLOR)  # Load image in color (3 channels)
-
-                # Create a figure and axis using Matplotlib
-                fig, ax = plt.subplots()
-
-                # Display the image in Matplotlib
-                ax.imshow(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))  # Convert BGR to RGB for displaying in Matplotlib
-
-                # Add text at the top-left corner
-                ax.text(10, 20, predicted_class, color="white", fontsize=14, 
-                        bbox=dict(facecolor="black", alpha=0.5, edgecolor="none"))
-
-                # Hide axes for clean look
-                ax.axis("off")
-
-                # Save the image with the overlayed text (with tight bounding box and no padding)
-                plt.savefig(save_image_path, bbox_inches="tight", pad_inches=0, dpi=300)
-
-                # Close the plot to avoid memory issues
-                plt.close(fig)
-
-
-        for slice_path in sagittal_slices:
-            name = os.path.basename(slice_path).split(".")[0]
-            image = cv2.imread(slice_path, cv2.IMREAD_COLOR)
-            slice = image / 255.0
-            slice = np.expand_dims(slice, axis=0)
-
-            pred = sagittal_model.predict(slice)[0]
             pred = np.squeeze(pred, axis=-1)
             pred = pred > 0.5
             pred = pred.astype(np.int32)
 
-            save_image_path = f"uploads/CT_Scans/CT{patient_id}/Results/Sagittal/{name}.png"
-            save_results(image, pred, save_image_path)
+            if np.sum(pred) != 0:  # If fracture is detected
+                save_image_path = os.path.join(report_images_folder, f"{view}_{name}.png")
+
+                save_results(image, pred, save_image_path)
+
+                # Grad-CAM heatmap generation (Only for U-Net)
+                heatmap = grad_cam(axial_model if view == "Axial" else coronal_model, slice, layer_name="conv2d_18")
+                heat_overlay = overlay_heatmap(image, heatmap)
+
+                heatmap_save_path = os.path.join(report_heat_folder, f"{view}_{name}.png")
+
+                cv2.imwrite(heatmap_save_path, heat_overlay.astype(np.uint8))
+
 
     return redirect(url_for('display', patient_id=patient_id, folder_type="Results"))
+
+
+
 @app.route('/delete_patient/<int:patient_id>', methods=['POST'])
 def delete_patient(patient_id):
     patient = Patient.query.get(patient_id)
@@ -595,8 +535,15 @@ def generate_report_route(patient_id):
     patient_folder = os.path.join(app.config['UPLOAD_FOLDER'], f"CT{patient_id}")  
     heatmap_path = os.path.join(app.config['UPLOAD_FOLDER'], 'gradcam.jpg')  
 
+    # Get the user's Downloads folder
+    #downloads_folder = os.path.join(os.path.expanduser("~"), "Downloads")
+    output_path="C:/reports"
+    #output_path = os.path.join(os.path.expanduser("~"), "Documents")
+# Ensure the Downloads folder exists (should exist by default)
+    if not os.path.exists(output_path):
+        print("downloads not accessable")
     # Set the output path to the user's download folder
-    output_path = os.path.join("C:\\Users\\georg\\Documents", f"report_{patient_id}.pdf")
+    #output_path = os.path.join("C:\\Users\\georg\\Documents", f"report_{patient_id}.pdf")
 
     print(f"Output path: {output_path}")  # Debugging
 
@@ -608,7 +555,7 @@ def generate_report_route(patient_id):
     print("2")
     # Generate the report
     print("1")
-    generate_report(patient_folder, heatmap_path, output_path, patient, doctor)
+    generate_report(patient_folder, output_path, patient, doctor)
     print("2")
     # Debugging: Check if the file was created
     if os.path.exists(output_path):
