@@ -1,1 +1,1 @@
-view
+model.fc = nn.Linear(model.fc.in_features, num_classes)

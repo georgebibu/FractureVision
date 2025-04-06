@@ -305,18 +305,25 @@ def fused_detection(patient_id):
         pred = pred > 0.5
         pred = pred.astype(np.int32)
         predicted_class=""
-        if(np.sum(pred) != 0):
-            axialresnetmodel = models.resnet18()
-            axialresnetmodel.fc = nn.Linear(axialresnetmodel.fc.in_features, num_classes)
-            axialresnetmodel.load_state_dict(torch.load(axialresnet_path, map_location=device))
-            axialresnetmodel = axialresnetmodel.to(device)
-            axialresnetmodel.eval()
+        if(np.sum(pred) != 0 and path!=sagittal_slice):
+            if path==axial_slice:
+                resnetmodel = models.resnet18()
+                resnetmodel.fc = nn.Linear(resnetmodel.fc.in_features, num_classes)
+                resnetmodel.load_state_dict(torch.load(axialresnet_path, map_location=device))
+                resnetmodel = resnetmodel.to(device)
+                resnetmodel.eval()
+            else:
+                resnetmodel = models.resnet18()
+                resnetmodel.fc = nn.Linear(resnetmodel.fc.in_features, num_classes)
+                resnetmodel.load_state_dict(torch.load(coronalresnet_path, map_location=device)["model_state_dict"])
+                resnetmodel = resnetmodel.to(device)
+                resnetmodel.eval()
             def predict_image(image_path):
                 image = Image.open(image_path).convert("RGB")
                 image = transform(image).unsqueeze(0).to(device)  # Add batch dimension
 
                 with torch.no_grad():
-                    outputs = axialresnetmodel(image)
+                    outputs = resnetmodel(image)
                     _, preds = torch.max(outputs, 1)
 
                 predicted_class = classes[preds.item()]
@@ -326,26 +333,13 @@ def fused_detection(patient_id):
         save_image_path = f"uploads/CT_Scans/CT{patient_id}/fused_results/{name}.png"
         save_results(image, pred, save_image_path)
         if predicted_class != "":
-            # Load the image in color (BGR format)
-            image = cv2.imread(save_image_path, cv2.IMREAD_COLOR)  # Load image in color (3 channels)
-
-            # Create a figure and axis using Matplotlib
+            image = cv2.imread(save_image_path, cv2.IMREAD_COLOR)
             fig, ax = plt.subplots()
-
-            # Display the image in Matplotlib
-            ax.imshow(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))  # Convert BGR to RGB for displaying in Matplotlib
-
-            # Add text at the top-left corner
+            ax.imshow(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
             ax.text(10, 20, predicted_class, color="white", fontsize=14, 
                     bbox=dict(facecolor="black", alpha=0.5, edgecolor="none"))
-
-            # Hide axes for clean look
             ax.axis("off")
-
-            # Save the image with the overlayed text (with tight bounding box and no padding)
             plt.savefig(save_image_path, bbox_inches="tight", pad_inches=0, dpi=300)
-
-            # Close the plot to avoid memory issues
             plt.close(fig)
 
     return redirect(url_for('display', patient_id=patient_id, folder_type="fused_results"))
@@ -511,10 +505,16 @@ def detection(patient_id):
     patient_folder = os.path.join("uploads", "CT_Scans", f"CT{patient_id}")
     slices_folder = os.path.join(patient_folder, "Slices")
     results_folder = os.path.join(patient_folder, "Results")
+    axial_results_folder = os.path.join(patient_folder, "Results","Axial")
+    coronal_results_folder = os.path.join(patient_folder, "Results","Coronal")
+    sagittal_results_folder = os.path.join(patient_folder, "Results","Sagittal")
     report_images_folder = os.path.join(patient_folder, "reportimages")
     report_heat_folder = os.path.join(patient_folder, "reportheat")
 
     os.makedirs(results_folder, exist_ok=True)
+    os.makedirs(axial_results_folder, exist_ok=True)
+    os.makedirs(coronal_results_folder, exist_ok=True)
+    os.makedirs(sagittal_results_folder, exist_ok=True)
     os.makedirs(report_images_folder, exist_ok=True)
     os.makedirs(report_heat_folder, exist_ok=True)
 
@@ -531,39 +531,64 @@ def detection(patient_id):
             image = cv2.imread(slice_path, cv2.IMREAD_COLOR)
             slice = image / 255.0
             slice = np.expand_dims(slice, axis=0)
-
             # Use U-Net for segmentation
             if view == "Axial":
-                pred = axial_model.predict(slice)[0]
                 model = axial_model
             elif view == "Coronal":
-                pred = coronal_model.predict(slice)[0]
                 model = coronal_model
             elif view=="Sagittal":  # Sagittal
-                pred = sagittal_model.predict(slice)[0]
                 model = sagittal_model
-
+            pred = model.predict(slice)[0]
             pred = np.squeeze(pred, axis=-1)
             pred = pred > 0.5
             pred = pred.astype(np.int32)
+            save_image_path = os.path.join(results_folder, view ,f"{name}.png")
+            save_results(image, pred, save_image_path)
+            predicted_class=""
+            if np.sum(pred) != 0 and view!= "Sagittal":
+                if view=="Axial":
+                    resnetmodel = models.resnet18()
+                    resnetmodel.fc = nn.Linear(resnetmodel.fc.in_features, num_classes)
+                    resnetmodel.load_state_dict(torch.load(axialresnet_path, map_location=device))
+                    resnetmodel = resnetmodel.to(device)
+                    resnetmodel.eval()
+                else:
+                    resnetmodel = models.resnet18()
+                    resnetmodel.fc = nn.Linear(resnetmodel.fc.in_features, num_classes)
+                    resnetmodel.load_state_dict(torch.load(coronalresnet_path, map_location=device)["model_state_dict"])
+                    resnetmodel = resnetmodel.to(device)
+                    resnetmodel.eval()
+                def predict_image(image_path):
+                    image = Image.open(image_path).convert("RGB")
+                    image = transform(image).unsqueeze(0).to(device)  # Add batch dimension
 
-            if np.sum(pred) != 0:  # If fracture is detected
+                    with torch.no_grad():
+                        outputs = resnetmodel(image)
+                        _, preds = torch.max(outputs, 1)
+
+                    predicted_class = classes[preds.item()]
+                    return predicted_class
+                predicted_class = predict_image(slice_path)
+                if predicted_class != "":
+                    print(save_image_path)
+                    image = cv2.imread(save_image_path, cv2.IMREAD_COLOR)
+                    fig, ax = plt.subplots()
+                    ax.imshow(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+                    ax.text(10, 20, predicted_class, color="white", fontsize=14, 
+                            bbox=dict(facecolor="black", alpha=0.5, edgecolor="none"))
+                    ax.axis("off")
+                    plt.savefig(save_image_path, bbox_inches="tight", pad_inches=0, dpi=300)
+                    plt.close(fig)
+
                 save_image_path = os.path.join(report_images_folder, f"{view}_{name}.png")
-
                 save_results(image, pred, save_image_path)
-
-                # Grad-CAM heatmap generation (Only for U-Net)
                 heatmap = grad_cam(axial_model if view == "Axial" else coronal_model, slice, layer_name="conv2d_18")
                 heat_overlay = overlay_heatmap(image, heatmap)
-
                 heatmap_save_path = os.path.join(report_heat_folder, f"{view}_{name}.png")
-
                 cv2.imwrite(heatmap_save_path, heat_overlay.astype(np.uint8))
 
 
     return redirect(url_for('display', patient_id=patient_id, folder_type="Results"))
-
-
 
 @app.route('/delete_patient/<int:patient_id>', methods=['POST'])
 def delete_patient(patient_id):
